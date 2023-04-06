@@ -109,6 +109,7 @@ class Parser():
 
 def cleanup_stl_io_stmt(node):
     # Given a ClangStatement with C++ STL IO operations, clean up into a more human-readable form
+    assignment = ""
     stream = ""
     operation = ""
     value = ""
@@ -146,6 +147,9 @@ def cleanup_stl_io_stmt(node):
                         foundOperator = True
                         continue
 
+        if not foundOperator:
+            assignment += str(curr)
+
         if foundStream and type(curr) == ClangVariableToken:
             value = str(curr)
 
@@ -153,14 +157,24 @@ def cleanup_stl_io_stmt(node):
                 value = "std::endl"
 
             break
+        elif foundOperator:
+            if type(curr) == ClangSyntaxToken and str(curr).strip() == "std":
+                if type(parser.peek()) == ClangOpToken and str(parser.peek()).strip() == "::":
+                    la2 = parser.peek(2)
+                    if type(la2) == ClangVariableToken:
+                        stream = str(curr) + str(parser.peek()) + str(la2)
 
-        elif foundOperator and type(curr) == ClangVariableToken:
-            stream = str(curr)
-            foundStream = True
+                        parser.next(3)
+                        foundStream = True
+                        continue
+
+            if type(curr) == ClangVariableToken:
+                stream = str(curr)
+                foundStream = True
 
         parser.next()
 
-    return stream + operation + value
+    return assignment + stream + operation + value
 
 def is_empty(node):
     # Check if ClangSyntaxToken is empty string or whitespace
@@ -195,6 +209,7 @@ while func is not None:
     if res.decompileCompleted():
         namespace = func.getParentNamespace()
         fname = func.getName()
+        clangAST = res.getCCodeMarkup()
         if namespace is not None and not namespace.isGlobal():
             fname = "{}::{}".format(namespace.getName(True), fname)
 
@@ -203,9 +218,12 @@ while func is not None:
             "qualifiedNamespace": namespace.getName(True),
             "entry": func.getEntryPoint().toString(),
             "decompiled": res.getDecompiledFunction().getC(),
-            "cleaned": cleanup_STL_IO(res.getCCodeMarkup()),
-            "nop": is_no_op_function(res.getCCodeMarkup())
+            "cleaned": cleanup_STL_IO(clangAST),
+            "nop": is_no_op_function(clangAST)
         }
+
+        if fname == "main":
+            print(cleanup_STL_IO(clangAST))
 
     func = prog.getFunctionAfter(func)
 
