@@ -3,6 +3,7 @@
 # @category: C3
 # @author: Team 7.1
 
+import os
 import re
 import sys
 
@@ -17,9 +18,9 @@ from ghidra.app.decompiler.flatapi import FlatDecompilerAPI
 # https://ghidra.re/ghidra_docs/api/ghidra/app/decompiler/package-summary.html
 from ghidra.app.decompiler import *
 
-#https://ghidra.re/ghidra_docs/api/ghidra/program/model/pcode/PcodeOp.html
-from ghidra.program.model.pcode import PcodeOp
+from ghidra.program.model.listing import VariableFilter
 
+from ghidra.program.model.pcode import *
 
 def is_empty(node):
     # Check if ClangSyntaxToken is empty string or whitespace
@@ -28,8 +29,7 @@ def is_empty(node):
 
 
 class Parser(object):
-    # Simple LALR(n) parser
-
+    # Simple LL(n) parser
     def __init__(self, root, skipEmpty=False, prog=None):
         self.root = root
         self.prog = prog
@@ -45,14 +45,17 @@ class Parser(object):
         if skipEmpty:
             self.tokens = filter(lambda x: not is_empty(x) and not type(x) == ClangCommentToken, self.tokens)
 
+
     def curr(self):
         # Returns token at cursor
         return self.tokens[self.cursor]
+
 
     def next(self, n=1):
         # Advances cursor by n and returns token at new cursor position
         if self.cursor + n >= len(self.tokens):
             return None
+
 
         self.cursor += n
         return self.tokens[self.cursor]
@@ -64,13 +67,10 @@ class Parser(object):
 
         return self.tokens[self.cursor + n]
 
+
     def seek(self, idx):
         # Sets cursor position
         self.cursor = min(max(idx, 0), len(self.tokens) - 1)
-
-
-class IOParser(Parser):
-    clean = None
 
     def match(self, tokval, strval, n=0):
         token = self.peek(n)
@@ -97,15 +97,22 @@ class IOParser(Parser):
     def multirematch(self, matches):
         return all(self.rematch(*match) for match in matches)
 
+
     def stmt_end(self, n=0):
         return not self.peek(n) or self.rematch(ClangSyntaxToken, ';|{|}', n)
 
 
-    def __init__(self, root, skipEmpty=True, prog=None):
+class IOParser(Parser):
+    stringTable = None
+
+
+    def __init__(self, root, skipEmpty=True, prog=None, stringTable=None):
         if sys.version_info[0] <= 2:
             super(IOParser, self).__init__(root, skipEmpty, prog)
         else:
             super().__init__(root, skipEmpty, prog)
+
+        self.stringTable = stringTable
 
 
     def __clean_cxx_stl_io_stmt_at_cursor(self):
@@ -144,6 +151,9 @@ class IOParser(Parser):
 
             if stream and type(self.curr()) == ClangVariableToken:
                 value = str(self.curr())
+
+                if self.curr().getPcodeOp().getInputs()[-1] in self.stringTable:
+                    print("found in stable {}".format(self.curr()))
 
                 if re.search("PTR_endl<.*>", value):
                     value = "std::endl"
@@ -188,7 +198,9 @@ class IOParser(Parser):
                 [ClangFuncNameToken, "^operator[<<|>>]", n + 4]
             ]
 
-            ok = ok or self.multirematch(pattern) or self.multirematch(pattern2)
+            if self.multirematch(pattern) or self.multirematch(pattern2):
+                ok = True
+                break
 
             n += 1
 
@@ -201,7 +213,7 @@ class IOParser(Parser):
             pattern = [
                 [ClangSyntaxToken, "^std$", n],
                 [ClangOpToken, "^::$", n + 1],
-                [ClangVariableToken, "c[in|out]", n + 2]
+                [ClangVariableToken, "c[in|out]|basic_.*stream<.*>", n + 2]
             ]
 
             if self.multirematch(pattern):
@@ -211,20 +223,7 @@ class IOParser(Parser):
 
         n = 0
         while not self.stmt_end(n):
-            # Check to see if operating on std::basic_*stream
-            pattern = [
-                [ClangSyntaxToken, "^std$", n],
-                [ClangOpToken, "^::$", n + 1],
-                [ClangVariableToken, "basic_.*stream<.*>", n + 2]
-            ]
-
-            if self.multirematch(pattern):
-                return True
-
-            n += 1
-
-        n = 0
-        while not self.stmt_end(n):
+            # Check to see if operating on variable type of basic_.*stream
             token = self.peek(n)
             if type(token) == ClangVariableToken:
                 high = token.getHighVariable()
@@ -238,31 +237,137 @@ class IOParser(Parser):
 
 
     def cleanup(self):
-        if self.clean is None:
-            self.clean = ""
+        while self.peek():
+            if self.__is_cxx_stl_io_stmt():
+                if self.prog:
+                    cleanIO = self.__clean_cxx_stl_io_stmt_at_cursor()
+                    cleanStr = "".join(cleanIO).strip()
+                    addr = self.curr().getMinAddress()
 
-            while self.peek():
-                if self.__is_cxx_stl_io_stmt():
-                    n = 0
-                    found=""
-                    while self.peek(n) and type(self.peek(n)) != ClangBreak:
-                        found += str(self.peek(n))
-                        n += 1
+                    print("found operator{} @ {} : {}".format(cleanIO[2], addr, cleanStr))
+                    preComment = self.prog.getPreComment(addr)
+                    comment = cleanStr
 
-                    if self.prog:
-                        cleanIO = self.__clean_cxx_stl_io_stmt_at_cursor()
-                        cleanStr = "".join(cleanIO).strip()
+                    if preComment and not cleanStr in preComment:
+                        comment = preComment + "\n\n" + comment
+
+                    self.prog.setPreComment(addr, comment)
+
+                while self.peek() and not self.stmt_end():
+                    self.next()
+
+            self.next()
+
+        self.seek(0)
+        while self.peek():
+            token = self.curr()
+            if type(token) == ClangVariableToken:
+                pcode = token.getPcodeOp()
+
+                if pcode and pcode.getOpcode() == PcodeOp.PTRSUB:
+                    vaddr = pcode.getInputs()[-1].getOffset()
+
+                    if vaddr in self.stringTable:
                         addr = self.curr().getMinAddress()
-
-                        print("found operator{} @ {} : {}".format(cleanIO[2], addr, cleanStr))
+                        comment = "var: {} -> str: {}".format(self.curr(), self.stringTable[vaddr])
                         preComment = self.prog.getPreComment(addr)
-                        if not preComment or not cleanStr in preComment:
-                            self.prog.setPreComment(addr, cleanStr)
 
-                    while self.peek() and type(self.peek()) != ClangBreak:
-                        self.next()
+                        if preComment and not comment in preComment:
+                            comment = preComment + "\n\n" + comment
 
-                self.next()
+                        self.prog.setPreComment(addr, comment)
+            self.next()
+
+
+def create_string_table(prog, decompIfc):
+    '''
+    Creates an address to c-string lookup table based off of static strings
+    found inside the library
+    '''
+
+    initFunction = prog.getGlobalFunctions("__static_initialization_and_destruction_0")[0]
+
+    # Did not find any static initializations
+    if not initFunction:
+        return
+
+    res = decompIfc.decompileFunction(initFunction, 30, monitor)
+
+    stringTable = {}
+
+    blocks = prog.getMemoryBlocks()
+    addrFactory = prog.getAddressFactory()
+    rodata = None
+    ramID = None
+
+    for b in blocks:
+        if b.getName() == '.rodata':
+            ramID = b.getStart().getAddressSpace().getSpaceID()
+            rodata = b
+            space = b.getStart().getAddressSpace()
+            print("found rodata: start: {} end: {} loaded: {} address space: {} ({})"
+                  .format(b.getStart(), b.getEnd(), b.isLoaded(), space.getName(), space.getSpaceID()))
+
+    if res.decompileCompleted():
+        clangAST = res.getCCodeMarkup()
+        parser = Parser(clangAST, skipEmpty=True, prog=prog)
+
+        stringAllocLocations = {}
+        while parser.peek():
+            # Assumption: Matched string constructor
+            #     Format: basic_string(stack_location, data_location)
+            if parser.match(ClangFuncNameToken, "basic_string"):
+                stackToken = None
+
+                while not parser.stmt_end():
+                    token = parser.curr()
+
+                    if type(token) == ClangVariableToken:
+                        if stackToken is not None:
+                            stringAllocLocations[str(stackToken)] = {
+                                "stack": stackToken,
+                                "data": token
+                            }
+                        else:
+                            stackToken = token
+
+                    parser.next()
+            parser.next()
+
+        for v in stringAllocLocations.values():
+            stackAddress = v["stack"].getPcodeOp().getInputs()[-1]
+            data = v["data"]
+
+            high = data.getHighVariable()
+            if high and type(high) == HighConstant:
+                stringTable[stackAddress.getOffset()] = str(data);
+
+            # Assert that we have a PTRSUB PcodeOp
+            pcode = data.getPcodeOp()
+            if not pcode or pcode.getOpcode() != PcodeOp.PTRSUB:
+                continue
+
+            # PcodeOp PTRSUB has inputs (val, address), we want the address
+            address = pcode.getInputs()[-1].getAddress()
+
+            # For some reason the addresses we get here from PCode Varnodes do not belong to the correct address space
+            if not address.isConstantAddress():
+                continue
+
+            # Convert const: address into RAM address within .RODATA address space
+            raddr = addrFactory.getAddress(ramID, address.getOffset())
+            byte = prog.getByte(raddr)
+            foundString = ""
+
+            # Assumption: ascii null-terminated string starts at the const address
+            while rodata.contains(raddr) and byte != 0:
+                foundString += chr(byte)
+                raddr = raddr.next()
+                byte = prog.getByte(raddr)
+
+            stringTable[stackAddress.getOffset()] = "\"{}\"".format(foundString)
+
+    return stringTable
 
 
 if __name__ == "__main__":
@@ -280,11 +385,13 @@ if __name__ == "__main__":
         decomp.initialize()
         decompIfc = decomp.getDecompiler()
 
+        stringTable = create_string_table(prog, decompIfc)
+
         res = decompIfc.decompileFunction(currentFunction, 30, monitor)
 
         if res.decompileCompleted():
             clangAST = res.getCCodeMarkup()
-            iop = IOParser(clangAST, skipEmpty=True, prog=prog)
+            iop = IOParser(clangAST, skipEmpty=True, prog=prog, stringTable=stringTable)
             iop.cleanup()
 
         decomp.dispose()

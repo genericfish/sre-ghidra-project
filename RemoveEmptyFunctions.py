@@ -50,6 +50,7 @@ if __name__ == "__main__":
     functions = {}
     func = prog.getFirstFunction()
 
+    numRemoved = 0
     while func:
         res = decompIfc.decompileFunction(func, 30, monitor)
 
@@ -60,9 +61,12 @@ if __name__ == "__main__":
             nextFunc = prog.getFunctionAfter(func)
             qualifiedNamespace = func.getParentNamespace().getName(True)
             if not func.isThunk() and not func.isExternal() and not re.search("<EXTERNAL>|__gnu_cxx|^std$", qualifiedNamespace) and is_no_op_function(clangAST) and not re.search("_fini$|register_tm_clones$", func.getName()):
-                print("found no-op function ({}) {} @ {}".format(qualifiedNamespace, func.getName(), func.getEntryPoint()))
+                print("removing no-op function ({}) {} @ {}".format(qualifiedNamespace, func.getName(), func.getEntryPoint()))
                 prog.removeFunction(func)
+                numRemoved += 1
 
             func = nextFunc
+
+    print("removed {} no-op functions.".format(numRemoved))
 
     decomp.dispose()
