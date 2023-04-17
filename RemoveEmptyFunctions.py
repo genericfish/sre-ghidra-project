@@ -1,4 +1,4 @@
-# Removes empty functions from the program.
+# Removes empty (no-op) functions from the program.
 
 # @category: C3
 # @author: Team 7.1

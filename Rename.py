@@ -1,4 +1,4 @@
-# # Renames variables to a simpler form
+# Renames variables to a simpler form
 #
 # # @category: C3
 # # @author: Team 7.1

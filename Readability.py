@@ -1,4 +1,4 @@
-# Finds C++ stream insertion/extraction operators and makes them more user friendly
+# Incorporates CleanIO.py, ControlFlow.py, RemovEmptyFunctions.py, and Rename.py
 
 # @category: C3
 # @author: Team 7.1

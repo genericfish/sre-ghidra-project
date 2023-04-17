@@ -1,3 +1,8 @@
+# Prints the control flow of the program, starting from main
+
+# @category: C3
+# @author: Team 7.1
+
 import os
 import re
 import sys
