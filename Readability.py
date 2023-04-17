@@ -4,8 +4,11 @@
 # @author: Team 7.1
 
 import os
+import json
 import re
 import sys
+import subprocess
+import time
 
 from ghidra.app.script import GhidraScript
 
@@ -21,6 +24,12 @@ from ghidra.app.decompiler import *
 from ghidra.program.model.listing import VariableFilter
 
 from ghidra.program.model.pcode import *
+
+# https://ghidra.re/ghidra_docs/api/ghidra/program/model/data/package-summary.html
+from ghidra.program.model.data import *
+
+# https://ghidra.re/ghidra_docs/api/ghidra/program/model/symbol/Symbol.html
+from ghidra.program.model.symbol import SourceType, SymbolType
 
 def is_empty(node):
     # Check if ClangSyntaxToken is empty string or whitespace
@@ -370,23 +379,141 @@ def create_string_table(prog, decompIfc):
     return stringTable
 
 
+
+#THE NEXT TWO FUNCTIONS ARE USED FOR THE REMOVE_EMPTY_FUNCS PART OF THE SCRIPT
+def extract_tokens(node, clang_token_types):
+    # Get tokens from ClangTokenGroup AST matching types in clangTokens
+    valid = any(map(lambda token: isinstance(node, token), clang_token_types))
+
+    if not valid:
+        tokens = []
+
+        for i in range(node.numChildren()):
+            child = node.Child(i)
+            tokens += extract_tokens(child, clang_token_types)
+
+        return tokens
+
+    return [node]
+
+def is_no_op_function(node):
+    # Check if a given ClangTokenGroup effectively is a no-op and can be safely ignored
+    stmts = extract_tokens(node, [ClangStatement])
+
+    return len(stmts) == 1 and stmts[0].numChildren() == 1
+
+
+
+#THIS BLCOK OF CODE IS USED FOR THE ControlFlow SCRIPT
+def getListOfFunctions():
+    listofFuncs =[]
+    function = getFirstFunction()
+    while function is not None:
+        listofFuncs.append(str(function.getName()))
+        function_address = function.getEntryPoint()
+        function = getFunctionAfter(function)
+        
+    return listofFuncs
+
+def FunctionsAddressDict():
+    funcDict = {}
+    function = getFirstFunction()
+    while function is not None:
+        functionName = str(function.getName())
+        functionAddress = function.getEntryPoint()
+        funcDict[functionName] = functionAddress
+        function = getFunctionAfter(function)
+    return funcDict
+
+def FunctionsVisitedDict():
+    funcDict = {}
+    function = getFirstFunction()
+    while function is not None:
+        functionName = str(function.getName())
+        funcDict[functionName] = 0 # Where zero represents not visited 
+        function = getFunctionAfter(function)
+    return funcDict
+
+def decompiledCurrentFunctionString(funcString=""):
+    prog = FlatProgramAPI(currentProgram, monitor)
+    decomp = FlatDecompilerAPI(prog)
+
+    currentFunction = prog.getFunctionContaining(currentAddress)
+    
+    if funcString != "":
+        funcAddressDict = FunctionsAddressDict()
+        funcAddress = funcAddressDict[funcString]
+        currentFunction = prog.getFunctionContaining(funcAddress)
+        
+    if currentFunction is None:
+        print("Error: No function found at address " + str(currentAddress))
+        exit()
+        
+    decomp.initialize()
+    decompIfc = decomp.getDecompiler()
+
+    DecompiledFunction = decompIfc.decompileFunction(currentFunction, 30, monitor)
+    
+    if DecompiledFunction.decompileCompleted():
+        DecompiledString = str(DecompiledFunction.getCCodeMarkup())
+        decomp.dispose()
+        return DecompiledString
+    else:
+        decomp.dispose()
+        return "ERROR"
+
+def getCalledFuncsNamesInDecompiledCode(funcStr):
+    patternFull = r'\b\w+\s*\([^)]*\);'
+    matchesFull = re.findall(patternFull, funcStr)
+    patternName = r'\b(\w+)\s*\([^)]*\);'
+    matchesName = re.findall(patternName, funcStr)
+    
+    verifiedMatchesName = []
+    listOfFunctions = getListOfFunctions()
+    
+    cominedList = zip(matchesFull, matchesName)
+    VerfiedCombined = []
+    for funcNames in cominedList:
+        if funcNames[1] in listOfFunctions:
+            verifiedMatchesName.append(funcNames[1])
+            VerfiedCombined.append(funcNames)
+
+    return [VerfiedCombined, verifiedMatchesName]
+    
+def getFunctionFlow(DecompiledFuncStr, depth, visitedDict):
+    
+    while len(getCalledFuncsNamesInDecompiledCode(DecompiledFuncStr)[1]) > 0:
+        for calledFuncName in getCalledFuncsNamesInDecompiledCode(DecompiledFuncStr)[0]:
+            
+            DecompiledFuncStr = decompiledCurrentFunctionString(calledFuncName[1])
+            if visitedDict[calledFuncName[1]] == 0:
+                visitedDict[calledFuncName[1]] = 1
+                getFunctionFlow(DecompiledFuncStr,depth+1, visitedDict)
+                print(depth*'-' + calledFuncName[0])
+            else:
+                return
+
+
+
+#THIS BLOCK OF CODE HAS THE DEFINITIONS FOR THE MAIN PARTS OF OUR SCRIPTS. THESE PARTS USE THE ABOVE CLASSES AND FUNCTIONS
 if __name__ == "__main__":
     prog = FlatProgramAPI(currentProgram, monitor)
     decomp = FlatDecompilerAPI(prog)
 
-    def cleanup():
+
+
+    def cleanup_IO():
         currentFunction = prog.getFunctionContaining(currentAddress)
 
         if not currentFunction:
-            print("[C3] No function containing current address.")
+            print("PLEASE OPEN A FUNCTION TO CLEAN STREAM OPERATIONS")
             return
 
-        print("[C3] Cleaning stream operations in {} @ {}".format(currentFunction.getName(), currentFunction.getEntryPoint()))
+        print("CLEANING STREAM OPERATIONS IN FUNCTION {} AT ADRESS {}".format(currentFunction.getName(), currentFunction.getEntryPoint()))
         decomp.initialize()
         decompIfc = decomp.getDecompiler()
 
         stringTable = create_string_table(prog, decompIfc)
-
         res = decompIfc.decompileFunction(currentFunction, 30, monitor)
 
         if res.decompileCompleted():
@@ -395,8 +522,108 @@ if __name__ == "__main__":
             iop.cleanup()
 
         
-        
+    def remove_empty_funcs():
+        print("REMOVING NO-OP FUNCTIONS")
+        decomp.initialize()
+        decompIfc = decomp.getDecompiler()
 
-        decomp.dispose()
+        cwd = os.path.dirname(os.path.realpath(__file__))
 
-    cleanup()
+        functions = {}
+        func = prog.getFirstFunction()
+
+        numRemoved = 0
+        while func:
+            res = decompIfc.decompileFunction(func, 30, monitor)
+
+            if res.decompileCompleted():
+                clangAST = res.getCCodeMarkup()
+
+
+                nextFunc = prog.getFunctionAfter(func)
+                qualifiedNamespace = func.getParentNamespace().getName(True)
+                if not func.isThunk() and not func.isExternal() and not re.search("<EXTERNAL>|__gnu_cxx|^std$", qualifiedNamespace) and is_no_op_function(clangAST) and not re.search("_fini$|register_tm_clones$", func.getName()):
+                    print("removing no-op function ({}) {} @ {}".format(qualifiedNamespace, func.getName(), func.getEntryPoint()))
+                    prog.removeFunction(func)
+                    numRemoved += 1
+
+                func = nextFunc
+
+        print("removed {} no-op functions.".format(numRemoved))
+
+    
+    def rename_types():
+        # initialization
+        print("RENAMING STRINGS AND VARIABLE NAMES")
+        currentFunction = prog.getFirstFunction()
+        if currentFunction is None:
+            print("PLEASE OPEN A FUNCTION TO RENAME TYPES")
+            return
+
+        while not currentFunction is None:
+            decomp.initialize()
+            decompIfc = decomp.getDecompiler()
+            res = decompIfc.decompileFunction(currentFunction, 30, monitor)
+
+            # for renaming the non-auto parameters
+            func = res.getFunction()
+            params = func.getParameters()
+
+            # renaming params
+            for j, param in enumerate(params):
+                if not param.isAutoParameter():
+                    #get name of data type and cleanup
+                    newName = re.sub('[^\w]', "", param.getDataType().getName().replace("basic_string<char,std::char_traits<char>,std::allocator<char>>", "std_string"))
+                    param.setName("{}_{}".format(newName, param.getName()), param.getSource())
+
+            # for getting the symbols to rename the variables
+            high_func = res.getHighFunction()
+            lsm = high_func.getLocalSymbolMap()
+            symbols = lsm.getSymbols()
+
+            # for renaming the variables
+            hfdbu = HighFunctionDBUtil()
+            for i, symbol in enumerate(symbols):
+                if not symbol.isParameter():
+                    #get name of data type and cleanup
+                    newName = re.sub('[^\w]', '', symbol.getDataType().getName().replace("basic_string<char,std::char_traits<char>,std::allocator<char>>", "std_string"))
+                    try: 
+                        hfdbu.updateDBVariable(symbol, "{}_{}".format(newName, i+1), None, SourceType.USER_DEFINED)
+                    except: 
+                        print("DUPLICATE VARIABLE NAME ENCOUNTERED: This is likely due to re-running this script or the rename.py script.")
+                        return
+
+            currentFunction = prog.getFunctionAfter(currentFunction)
+    
+    
+    def control_flow():
+        print("PRINTING THE CONTROL FLOW, SENDING REVERSED CODE TO A FILE")
+        location = os.path.dirname(os.path.realpath(__file__)) + "\\"
+        with open(location + 'temp.cpp', 'w') as f:
+            f.write(decompiledCurrentFunctionString())
+            subprocess.Popen("clang-format " + location + 'temp.cpp > ' + location + 'temp.cpp', shell=True) 
+            f.write("\n/*\nrun: ./fuzz\n*/")
+            subprocess.Popen("code " + location, shell=True)     
+
+        # Print my control Flow, Will prob use this in conjunction with the write decompiled file above for a
+        # clickable HTML map that will display the program when clicked
+        prog = FlatProgramAPI(currentProgram, monitor)
+        decomp = FlatDecompilerAPI(prog)
+        currentFunction = prog.getFunctionContaining(currentAddress)
+        print(str(currentFunction)) 
+        DecompiledFuncStr = decompiledCurrentFunctionString()
+        depth = 1
+        visitedDict = FunctionsVisitedDict()
+        getFunctionFlow(DecompiledFuncStr, depth, visitedDict)
+    
+
+
+    #CALLS THE FUNCTIONS DEFINED ABOVE, WHICH ARE THE MAJOR SCRIPTS WE DEVELOPED, JUST COMBINED
+    remove_empty_funcs()
+    print('\n\n')
+    cleanup_IO()
+    print('\n\n')
+    rename_types()
+    print('\n\n')
+    control_flow()
+    decomp.dispose()

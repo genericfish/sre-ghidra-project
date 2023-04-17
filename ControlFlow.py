@@ -4,6 +4,10 @@ import sys
 import subprocess
 import time
 
+
+# Make the nodes in the BFS control flow algorithm have a visited option
+# That way it will be resistant to recursion
+
 from ghidra.app.script import GhidraScript
 
 # https://ghidra.re/ghidra_docs/api/ghidra/program/flatapi/FlatProgramAPI.html
@@ -19,7 +23,7 @@ from ghidra.program.model.listing import VariableFilter
 
 from ghidra.program.model.pcode import *
 
-location = "/home/parallels/ghidra_scripts/malWhere/"
+location = os.path.dirname(os.path.realpath(__file__)) + "\\"
 
 def getListOfFunctions():
     listofFuncs =[]
@@ -38,6 +42,15 @@ def FunctionsAddressDict():
         functionName = str(function.getName())
         functionAddress = function.getEntryPoint()
         funcDict[functionName] = functionAddress
+        function = getFunctionAfter(function)
+    return funcDict
+
+def FunctionsVisitedDict():
+    funcDict = {}
+    function = getFirstFunction()
+    while function is not None:
+        functionName = str(function.getName())
+        funcDict[functionName] = 0 # Where zero represents not visited 
         function = getFunctionAfter(function)
     return funcDict
 
@@ -88,14 +101,18 @@ def getCalledFuncsNamesInDecompiledCode(funcStr):
     return [VerfiedCombined, verifiedMatchesName]
     
 
-def getFunctionFlow(DecompiledFuncStr, depth):
+def getFunctionFlow(DecompiledFuncStr, depth, visitedDict):
     
     while len(getCalledFuncsNamesInDecompiledCode(DecompiledFuncStr)[1]) > 0:
         for calledFuncName in getCalledFuncsNamesInDecompiledCode(DecompiledFuncStr)[0]:
             
             DecompiledFuncStr = decompiledCurrentFunctionString(calledFuncName[1])
-            getFunctionFlow(DecompiledFuncStr,depth+1)
-            print(depth*'-' + calledFuncName[0])
+            if visitedDict[calledFuncName[1]] == 0:
+                visitedDict[calledFuncName[1]] = 1
+                getFunctionFlow(DecompiledFuncStr,depth+1, visitedDict)
+                print(depth*'-' + calledFuncName[0])
+            else:
+                return
 
 
 # This will write the decompiled function to a string and clean it up with clang, Will prob use for C4
@@ -113,4 +130,7 @@ currentFunction = prog.getFunctionContaining(currentAddress)
 print(str(currentFunction)) 
 DecompiledFuncStr = decompiledCurrentFunctionString()
 depth = 1
-getFunctionFlow(DecompiledFuncStr, depth)
+visitedDict = FunctionsVisitedDict()
+getFunctionFlow(DecompiledFuncStr, depth, visitedDict)
+
+
